@@ -159,62 +159,64 @@ def validate_url(url):
 def get_video_info(url):
     """Fetch video metadata using yt-dlp with multiple fallback approaches"""
     
+    # Common options for all approaches
+    common_opts = [
+        '--dump-json',
+        '--no-playlist',
+        '--no-warnings',
+        '--remote-components', 'ejs:github',  # Enable JS challenge solver
+    ]
+    
     # Try different approaches in order
     approaches = [
-        # Approach 1: Web client (most compatible)
+        # Approach 1: Web embedded client (often bypasses restrictions)
+        {
+            'name': 'web embedded',
+            'cmd': [
+                'yt-dlp',
+                *common_opts,
+                '--extractor-args', 'youtube:player_client=web_embedded',
+                url
+            ]
+        },
+        # Approach 2: Web client
         {
             'name': 'web client',
             'cmd': [
                 'yt-dlp',
-                '--dump-json',
-                '--no-playlist',
-                '--no-warnings',
+                *common_opts,
                 '--extractor-args', 'youtube:player_client=web',
                 url
             ]
         },
-        # Approach 2: Android client
+        # Approach 3: Android client (bypasses age restrictions)
         {
             'name': 'android client',
             'cmd': [
                 'yt-dlp',
-                '--dump-json',
-                '--no-playlist',
-                '--no-warnings',
+                *common_opts,
                 '--extractor-args', 'youtube:player_client=android',
                 url
             ]
         },
-        # Approach 3: iOS client  
+        # Approach 4: TV embedded client
         {
-            'name': 'ios client',
+            'name': 'tv embedded',
             'cmd': [
                 'yt-dlp',
-                '--dump-json',
-                '--no-playlist',
-                '--no-warnings',
-                '--extractor-args', 'youtube:player_client=ios',
+                *common_opts,
+                '--extractor-args', 'youtube:player_client=tv_embedded',
                 url
             ]
         },
-        # Approach 4: Minimal (let yt-dlp decide)
+        # Approach 5: Minimal (let yt-dlp decide)
         {
             'name': 'minimal',
             'cmd': [
                 'yt-dlp',
                 '--dump-json',
                 '--no-playlist',
-                url
-            ]
-        },
-        # Approach 5: Force generic extractor
-        {
-            'name': 'force ipv4',
-            'cmd': [
-                'yt-dlp',
-                '--dump-json',
-                '--no-playlist',
-                '--force-ipv4',
+                '--remote-components', 'ejs:github',
                 url
             ]
         },
@@ -270,6 +272,8 @@ def stream_mp3(url):
         '-o', '-',
         '--no-playlist',
         '--no-warnings',
+        '--remote-components', 'ejs:github',  # Enable JS challenge solver
+        '--extractor-args', 'youtube:player_client=web_embedded',
         url
     ]
     
