@@ -4,6 +4,7 @@ By Studio Oscar — Since 1931
 
 A simple YouTube to MP3 streaming tool for family use.
 No storage required - streams MP3 directly to browser.
+No restrictions - this is for grandpa!
 """
 
 from flask import Flask, render_template, request, Response, jsonify
@@ -22,8 +23,17 @@ YOUTUBE_PATTERNS = [
     r'^(https?://)?(www\.)?(youtube\.com/embed/)[\w-]+',
     r'^(https?://)?(music\.youtube\.com/watch\?v=)[\w-]+',
 ]
-MAX_DURATION = 3600  # 1 hour max
+MAX_DURATION = 7200  # 2 hours max (increased for grandpa!)
 AUDIO_QUALITY = '192'
+
+# yt-dlp options to bypass restrictions (family use only!)
+YTDLP_BYPASS_OPTIONS = [
+    '--age-limit', '99',  # No age restrictions
+    '--extractor-args', 'youtube:player_client=android',  # Android client bypasses many restrictions
+    '--no-check-certificates',  # Skip cert checks
+    '--geo-bypass',  # Bypass geo restrictions
+    '--ignore-errors',  # Continue on errors
+]
 
 
 # --- Routes ---
@@ -129,15 +139,14 @@ def get_video_info(url):
         '--dump-json',
         '--no-playlist',
         '--no-warnings',
-        url
-    ]
+    ] + YTDLP_BYPASS_OPTIONS + [url]
     
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=60  # Increased timeout
         )
         
         if result.returncode != 0:
@@ -164,8 +173,7 @@ def stream_mp3(url):
         '--no-playlist',
         '--no-warnings',
         '--quiet',
-        url
-    ]
+    ] + YTDLP_BYPASS_OPTIONS + [url]
     
     process = subprocess.Popen(
         cmd,
@@ -199,12 +207,8 @@ def parse_ytdlp_error(stderr):
         return 'Video not found or unavailable'
     if 'private video' in stderr_lower:
         return 'This video is private'
-    if 'sign in' in stderr_lower or 'age' in stderr_lower:
-        return 'This video is age-restricted'
     if 'copyright' in stderr_lower:
         return 'Video unavailable due to copyright'
-    if 'geo' in stderr_lower or 'country' in stderr_lower:
-        return 'Video not available in your region'
     if 'removed' in stderr_lower or 'deleted' in stderr_lower:
         return 'This video has been removed'
     if 'live' in stderr_lower:
@@ -213,6 +217,9 @@ def parse_ytdlp_error(stderr):
         return 'This video is not yet available'
     if 'not a valid url' in stderr_lower:
         return 'Please enter a valid YouTube link'
+    
+    # Don't show age restriction error - we bypass it!
+    # Don't show geo restriction error - we bypass it!
     
     return 'Unable to process this video. Please try another.'
 
@@ -266,4 +273,3 @@ if __name__ == '__main__':
         port=port,
         debug=debug
     )
-
