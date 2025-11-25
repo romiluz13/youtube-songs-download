@@ -25,6 +25,7 @@ app = Flask(__name__)
 # --- Configuration ---
 MAX_DURATION = 7200  # 2 hours max
 AUDIO_QUALITY = '192'
+COOKIES_FILE = os.environ.get('COOKIES_FILE', '/tmp/cookies.txt')
 
 # yt-dlp options - following MeTube's approach
 YTDLP_BASE_OPTIONS = {
@@ -38,6 +39,11 @@ YTDLP_BASE_OPTIONS = {
     'retries': 3,
     'fragment_retries': 3,
 }
+
+# Check if cookies file exists and add it to options
+if os.path.exists(COOKIES_FILE):
+    YTDLP_BASE_OPTIONS['cookiefile'] = COOKIES_FILE
+    log.info(f"Using cookies from: {COOKIES_FILE}")
 
 # Try to enable impersonate feature if curl_cffi is available
 try:
@@ -189,8 +195,13 @@ def download():
                 '--quiet',
                 '--no-warnings',
                 '--no-check-certificates',
-                url,
             ]
+            
+            # Add cookies if available
+            if os.path.exists(COOKIES_FILE):
+                cmd.extend(['--cookies', COOKIES_FILE])
+            
+            cmd.append(url)
             
             log.info(f"Running command: {' '.join(cmd)}")
             
@@ -240,7 +251,35 @@ def health():
         'status': 'ok',
         'yt_dlp_version': yt_dlp.version.__version__,
         'impersonate_available': IMPERSONATE_AVAILABLE,
+        'cookies_file_exists': os.path.exists(COOKIES_FILE),
     })
+
+
+@app.route('/api/cookies', methods=['POST'])
+def upload_cookies():
+    """Upload cookies.txt content"""
+    data = request.get_json()
+    cookies_content = data.get('cookies', '')
+    
+    if not cookies_content:
+        return jsonify({'error': 'No cookies provided'}), 400
+    
+    try:
+        # Validate it looks like a Netscape cookies file
+        if not cookies_content.strip().startswith('#') and 'youtube' not in cookies_content.lower():
+            return jsonify({'error': 'Invalid cookies format. Export as Netscape format.'}), 400
+        
+        with open(COOKIES_FILE, 'w') as f:
+            f.write(cookies_content)
+        
+        # Update the global options
+        YTDLP_BASE_OPTIONS['cookiefile'] = COOKIES_FILE
+        
+        log.info(f"Cookies uploaded successfully to {COOKIES_FILE}")
+        return jsonify({'status': 'ok', 'message': 'Cookies saved successfully'})
+    except Exception as e:
+        log.error(f"Failed to save cookies: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 # --- Helper Functions ---
