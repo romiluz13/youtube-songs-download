@@ -1,17 +1,20 @@
-run = "pip install -q flask yt-dlp && python app.py"
-language = "python3"
+modules = ["python-3.11:v25-20240224-f2a48d6"]
+run = "python app.py"
 entrypoint = "app.py"
 
 [nix]
 channel = "stable-24_05"
 
 [deployment]
-run = ["sh", "-c", "pip install flask yt-dlp && python app.py"]
+run = ["sh", "-c", "python app.py"]
 deploymentTarget = "cloudrun"
 
 [[ports]]
 localPort = 5000
 externalPort = 80
+
+[unitTest]
+language = "python3"
 
 [packager]
 language = "python3"
