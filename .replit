@@ -23,3 +23,6 @@ language = "python3"
 enabledForHosting = true
 packageSearch = true
 guessImports = true
+
+[agent]
+expertMode = true
