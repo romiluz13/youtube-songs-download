@@ -4,7 +4,7 @@ By Studio Oscar — Since 1931
 
 A simple YouTube to MP3 streaming tool for family use.
 No storage required - streams MP3 directly to browser.
-No restrictions - birthday gift for grandpa!
+Birthday gift for grandpa!
 """
 
 from flask import Flask, render_template, request, Response, jsonify
@@ -18,12 +18,12 @@ app = Flask(__name__)
 
 # --- Configuration ---
 YOUTUBE_PATTERNS = [
-    r'^(https?://)?(www\.)?youtube\.com/watch\?v=[\w-]+',
-    r'^(https?://)?youtu\.be/[\w-]+',
-    r'^(https?://)?(www\.)?youtube\.com/shorts/[\w-]+',
-    r'^(https?://)?(www\.)?youtube\.com/embed/[\w-]+',
-    r'^(https?://)?music\.youtube\.com/watch\?v=[\w-]+',
-    r'^(https?://)?(www\.)?youtube\.com/v/[\w-]+',
+    r'youtube\.com/watch',
+    r'youtu\.be/',
+    r'youtube\.com/shorts/',
+    r'youtube\.com/embed/',
+    r'youtube\.com/v/',
+    r'music\.youtube\.com',
 ]
 MAX_DURATION = 7200  # 2 hours max
 AUDIO_QUALITY = '192'
@@ -119,22 +119,40 @@ def health():
     return jsonify({'status': 'ok'})
 
 
+@app.route('/api/update-ytdlp')
+def update_ytdlp():
+    """Update yt-dlp to latest version"""
+    try:
+        result = subprocess.run(
+            ['pip', 'install', '--upgrade', 'yt-dlp'],
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        return jsonify({
+            'status': 'ok',
+            'output': result.stdout,
+            'error': result.stderr
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 # --- Helper Functions ---
 
 def validate_url(url):
-    """Validate YouTube URL format"""
+    """Validate YouTube URL format - very permissive"""
     if not url:
         return False
     
-    # Clean the URL
-    url = url.strip()
+    url_lower = url.lower()
     
-    for pattern in YOUTUBE_PATTERNS:
-        if re.match(pattern, url, re.IGNORECASE):
-            print(f"[INFO] URL matched pattern: {pattern}", file=sys.stderr)
-            return True
+    # Simple check - just needs to contain youtube or youtu.be
+    if 'youtube.com' in url_lower or 'youtu.be' in url_lower:
+        print(f"[INFO] URL validated: {url}", file=sys.stderr)
+        return True
     
-    print(f"[WARN] URL did not match any pattern: {url}", file=sys.stderr)
+    print(f"[WARN] URL did not match: {url}", file=sys.stderr)
     return False
 
 
@@ -143,63 +161,97 @@ def get_video_info(url):
     
     # Try different approaches in order
     approaches = [
-        # Approach 1: Standard with bypasses
-        [
-            'yt-dlp',
-            '--dump-json',
-            '--no-playlist',
-            '--no-warnings',
-            '--age-limit', '99',
-            '--geo-bypass',
-            url
-        ],
-        # Approach 2: With Android client
-        [
-            'yt-dlp',
-            '--dump-json',
-            '--no-playlist',
-            '--no-warnings',
-            '--extractor-args', 'youtube:player_client=android',
-            '--age-limit', '99',
-            url
-        ],
-        # Approach 3: Minimal options
-        [
-            'yt-dlp',
-            '--dump-json',
-            '--no-playlist',
-            url
-        ],
+        # Approach 1: Web client (most compatible)
+        {
+            'name': 'web client',
+            'cmd': [
+                'yt-dlp',
+                '--dump-json',
+                '--no-playlist',
+                '--no-warnings',
+                '--extractor-args', 'youtube:player_client=web',
+                url
+            ]
+        },
+        # Approach 2: Android client
+        {
+            'name': 'android client',
+            'cmd': [
+                'yt-dlp',
+                '--dump-json',
+                '--no-playlist',
+                '--no-warnings',
+                '--extractor-args', 'youtube:player_client=android',
+                url
+            ]
+        },
+        # Approach 3: iOS client  
+        {
+            'name': 'ios client',
+            'cmd': [
+                'yt-dlp',
+                '--dump-json',
+                '--no-playlist',
+                '--no-warnings',
+                '--extractor-args', 'youtube:player_client=ios',
+                url
+            ]
+        },
+        # Approach 4: Minimal (let yt-dlp decide)
+        {
+            'name': 'minimal',
+            'cmd': [
+                'yt-dlp',
+                '--dump-json',
+                '--no-playlist',
+                url
+            ]
+        },
+        # Approach 5: Force generic extractor
+        {
+            'name': 'force ipv4',
+            'cmd': [
+                'yt-dlp',
+                '--dump-json',
+                '--no-playlist',
+                '--force-ipv4',
+                url
+            ]
+        },
     ]
     
     last_error = None
     
-    for i, cmd in enumerate(approaches):
+    for approach in approaches:
         try:
-            print(f"[INFO] Trying approach {i+1}: {' '.join(cmd[:5])}...", file=sys.stderr)
+            print(f"[INFO] Trying {approach['name']}...", file=sys.stderr)
             
             result = subprocess.run(
-                cmd,
+                approach['cmd'],
                 capture_output=True,
                 text=True,
-                timeout=90
+                timeout=120
             )
             
+            print(f"[DEBUG] Return code: {result.returncode}", file=sys.stderr)
+            
             if result.returncode == 0 and result.stdout.strip():
-                print(f"[INFO] Approach {i+1} succeeded!", file=sys.stderr)
-                return json.loads(result.stdout)
+                print(f"[INFO] {approach['name']} succeeded!", file=sys.stderr)
+                try:
+                    return json.loads(result.stdout)
+                except json.JSONDecodeError:
+                    print(f"[WARN] JSON parse failed for {approach['name']}", file=sys.stderr)
+                    continue
             else:
-                print(f"[WARN] Approach {i+1} failed: {result.stderr[:200]}", file=sys.stderr)
+                stderr_preview = result.stderr[:500] if result.stderr else 'No stderr'
+                print(f"[WARN] {approach['name']} failed: {stderr_preview}", file=sys.stderr)
                 last_error = result.stderr
                 
         except subprocess.TimeoutExpired:
-            print(f"[WARN] Approach {i+1} timed out", file=sys.stderr)
+            print(f"[WARN] {approach['name']} timed out", file=sys.stderr)
             last_error = "Request timed out"
-        except json.JSONDecodeError as e:
-            print(f"[WARN] Approach {i+1} JSON error: {e}", file=sys.stderr)
-            last_error = "Failed to parse video info"
         except Exception as e:
-            print(f"[WARN] Approach {i+1} exception: {e}", file=sys.stderr)
+            print(f"[WARN] {approach['name']} exception: {e}", file=sys.stderr)
             last_error = str(e)
     
     # All approaches failed
@@ -218,9 +270,6 @@ def stream_mp3(url):
         '-o', '-',
         '--no-playlist',
         '--no-warnings',
-        '--quiet',
-        '--age-limit', '99',
-        '--geo-bypass',
         url
     ]
     
@@ -261,6 +310,7 @@ def parse_ytdlp_error(stderr):
     
     stderr_lower = stderr.lower()
     
+    # Check for specific errors
     if 'video unavailable' in stderr_lower:
         return 'Video not found or unavailable'
     if 'private video' in stderr_lower:
@@ -269,17 +319,22 @@ def parse_ytdlp_error(stderr):
         return 'Video unavailable due to copyright'
     if 'removed' in stderr_lower or 'deleted' in stderr_lower:
         return 'This video has been removed'
-    if 'live' in stderr_lower and 'stream' in stderr_lower:
-        return 'Live streams cannot be downloaded'
     if 'premiere' in stderr_lower:
         return 'This video is not yet available'
-    if 'not a valid url' in stderr_lower:
-        return 'Please enter a valid YouTube link'
-    if 'unable to extract' in stderr_lower:
-        return 'Could not access this video. Try again.'
+    if 'sign in' in stderr_lower:
+        return 'This video requires sign in'
+    if 'age' in stderr_lower:
+        return 'Age-restricted video - trying bypass...'
     if 'http error 403' in stderr_lower:
-        return 'Video access denied. Try again.'
+        return 'Access denied by YouTube'
+    if 'http error 429' in stderr_lower:
+        return 'Too many requests - wait a moment'
+    if 'unable to extract' in stderr_lower:
+        return 'Could not extract video info'
+    if 'no video formats' in stderr_lower:
+        return 'No downloadable formats found'
     
+    # Return a generic but helpful message
     return 'Unable to process this video. Please try another.'
 
 
@@ -331,6 +386,13 @@ if __name__ == '__main__':
     debug = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
     
     print(f"[INFO] Starting Langsam Songs Downloader on port {port}", file=sys.stderr)
+    print(f"[INFO] Checking yt-dlp version...", file=sys.stderr)
+    
+    try:
+        result = subprocess.run(['yt-dlp', '--version'], capture_output=True, text=True)
+        print(f"[INFO] yt-dlp version: {result.stdout.strip()}", file=sys.stderr)
+    except:
+        print(f"[WARN] Could not get yt-dlp version", file=sys.stderr)
     
     app.run(
         host='0.0.0.0',
