@@ -3,6 +3,7 @@
  * By Studio Oscar — Since 1931
  * 
  * Client-side JavaScript for form handling and download management.
+ * Birthday gift for grandpa!
  */
 
 // === DOM Elements ===
@@ -19,8 +20,15 @@ const inputError = document.getElementById('input-error');
 // === State ===
 let isProcessing = false;
 
-// === YouTube URL Pattern ===
-const YOUTUBE_PATTERN = /^(https?:\/\/)?(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/shorts\/|youtube\.com\/embed\/|music\.youtube\.com\/watch\?v=)[\w-]+/i;
+// === YouTube URL Patterns (very permissive for grandpa!) ===
+const YOUTUBE_PATTERNS = [
+    /youtube\.com\/watch/i,
+    /youtu\.be\//i,
+    /youtube\.com\/shorts\//i,
+    /youtube\.com\/embed\//i,
+    /youtube\.com\/v\//i,
+    /music\.youtube\.com/i,
+];
 
 // === Initialize ===
 document.addEventListener('DOMContentLoaded', init);
@@ -93,7 +101,8 @@ function clearInput() {
 // === Core Functions ===
 
 function validateUrl(url) {
-    return YOUTUBE_PATTERN.test(url);
+    // Check if URL contains any YouTube pattern
+    return YOUTUBE_PATTERNS.some(pattern => pattern.test(url));
 }
 
 async function startDownload(url) {
@@ -103,8 +112,30 @@ async function startDownload(url) {
     showProgress('Fetching video info...', 5);
     
     try {
-        // Step 1: Get video info
-        const info = await fetchVideoInfo(url);
+        // Step 1: Get video info (with retry)
+        let info;
+        let retries = 2;
+        let lastError;
+        
+        while (retries >= 0) {
+            try {
+                info = await fetchVideoInfo(url);
+                break; // Success!
+            } catch (err) {
+                lastError = err;
+                retries--;
+                if (retries >= 0) {
+                    console.log(`Retry attempt, ${retries + 1} left...`);
+                    showProgress('Retrying...', 10);
+                    await sleep(1000);
+                }
+            }
+        }
+        
+        if (!info) {
+            throw lastError || new Error('Could not get video info');
+        }
+        
         showSongInfo(info);
         showProgress('Preparing download...', 30);
         
@@ -136,6 +167,7 @@ async function startDownload(url) {
         }, 4000);
         
     } catch (error) {
+        console.error('Download error:', error);
         showError('Download failed', error.message || 'Please try again.');
         hideProgress();
         hideSongInfo();
@@ -146,7 +178,13 @@ async function startDownload(url) {
 
 async function fetchVideoInfo(url) {
     const response = await fetch(`/api/info?url=${encodeURIComponent(url)}`);
-    const data = await response.json();
+    
+    let data;
+    try {
+        data = await response.json();
+    } catch (e) {
+        throw new Error('Server error. Please try again.');
+    }
     
     if (!response.ok) {
         throw new Error(data.error || 'Failed to fetch video info');
@@ -171,10 +209,12 @@ async function triggerDownload(url, title) {
         setTimeout(() => {
             // Clean up iframe after download starts
             setTimeout(() => {
-                document.body.removeChild(iframe);
-            }, 60000); // Keep iframe for 1 minute to allow download
+                if (iframe.parentNode) {
+                    document.body.removeChild(iframe);
+                }
+            }, 120000); // Keep iframe for 2 minutes to allow download
             resolve();
-        }, 1000);
+        }, 1500);
     });
 }
 
@@ -264,13 +304,13 @@ function resetForm() {
     hideProgress();
     hideSongInfo();
     clearInputError();
-    
-    // Don't clear the input - user might want to download another
-    // urlInput.value = '';
-    // clearBtn.classList.remove('visible');
 }
 
 // === Utilities ===
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 function formatDuration(seconds) {
     if (!seconds || seconds <= 0) return '0:00';
@@ -294,4 +334,3 @@ function sanitizeFilename(title) {
         .substring(0, 100)
         .trim() || 'download';
 }
-
