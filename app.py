@@ -49,13 +49,14 @@ except ImportError:
     log.warning("curl_cffi not available - impersonate feature disabled")
 
 
-def get_ytdlp_options(for_info=True):
+def get_ytdlp_options(for_info=True, use_impersonate=False):
     """Get yt-dlp options with impersonate if available"""
     opts = dict(YTDLP_BASE_OPTIONS)
     
-    # Try impersonate feature (requires curl_cffi)
-    if IMPERSONATE_AVAILABLE:
+    # Try impersonate feature only if explicitly requested and available
+    if use_impersonate and IMPERSONATE_AVAILABLE:
         try:
+            import yt_dlp.networking.impersonate
             opts['impersonate'] = yt_dlp.networking.impersonate.ImpersonateTarget.from_str('chrome')
             log.info("Using Chrome impersonation")
         except Exception as e:
@@ -89,36 +90,54 @@ def get_info():
     if not validate_url(url):
         return jsonify({'error': 'Please enter a valid YouTube link'}), 400
     
-    try:
-        opts = get_ytdlp_options(for_info=True)
-        
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-        
-        if not info:
-            return jsonify({'error': 'Could not get video information'}), 400
-        
-        # Check duration limit
-        duration = info.get('duration', 0) or 0
-        if duration and duration > MAX_DURATION:
+    # Try without impersonate first (usually works), then with if available
+    attempts = [
+        ('standard', False),
+        ('impersonate', True),
+    ]
+    
+    last_error = None
+    
+    for attempt_name, use_imp in attempts:
+        if use_imp and not IMPERSONATE_AVAILABLE:
+            continue
+            
+        try:
+            log.info(f"Trying {attempt_name} approach...")
+            opts = get_ytdlp_options(for_info=True, use_impersonate=use_imp)
+            
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            
+            if not info:
+                continue
+            
+            # Check duration limit
+            duration = info.get('duration', 0) or 0
+            if duration and duration > MAX_DURATION:
+                return jsonify({
+                    'error': f'Video too long (max {MAX_DURATION // 60} minutes)'
+                }), 400
+            
+            log.info(f"Success with {attempt_name} approach!")
             return jsonify({
-                'error': f'Video too long (max {MAX_DURATION // 60} minutes)'
-            }), 400
-        
-        return jsonify({
-            'title': info.get('title', 'Unknown'),
-            'channel': info.get('uploader', info.get('channel', 'Unknown')),
-            'duration': duration,
-            'thumbnail': get_best_thumbnail(info),
-        })
-        
-    except yt_dlp.utils.DownloadError as e:
-        error_msg = parse_ytdlp_error(str(e))
-        log.error(f"yt-dlp DownloadError: {e}")
-        return jsonify({'error': error_msg}), 400
-    except Exception as e:
-        log.error(f"Unexpected error in get_info: {e}")
-        return jsonify({'error': 'Unable to process this video'}), 400
+                'title': info.get('title', 'Unknown'),
+                'channel': info.get('uploader', info.get('channel', 'Unknown')),
+                'duration': duration,
+                'thumbnail': get_best_thumbnail(info),
+            })
+            
+        except yt_dlp.utils.DownloadError as e:
+            last_error = str(e)
+            log.warning(f"{attempt_name} failed: {e}")
+        except Exception as e:
+            last_error = str(e)
+            log.warning(f"{attempt_name} exception: {e}")
+    
+    # All attempts failed
+    error_msg = parse_ytdlp_error(last_error) if last_error else 'Unable to process this video'
+    log.error(f"All attempts failed. Last error: {last_error}")
+    return jsonify({'error': error_msg, 'debug': last_error[:200] if last_error else None}), 400
 
 
 @app.route('/api/download')
@@ -169,13 +188,9 @@ def download():
                 '--no-playlist',
                 '--quiet',
                 '--no-warnings',
+                '--no-check-certificates',
+                url,
             ]
-            
-            # Add impersonate if available
-            if IMPERSONATE_AVAILABLE:
-                cmd.extend(['--impersonate', 'chrome'])
-            
-            cmd.append(url)
             
             log.info(f"Running command: {' '.join(cmd)}")
             

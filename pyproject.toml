@@ -5,7 +5,7 @@ description = "YouTube to MP3 downloader for family use - By Studio Oscar Since 
 requires-python = ">=3.9"
 dependencies = [
     "flask>=3.0.0",
-    "yt-dlp[default,curl-cffi]>=2025.1.0",
+    "yt-dlp>=2024.1.0",
 ]
 
 [build-system]
