@@ -3,30 +3,68 @@ Langsam Songs Downloader
 By Studio Oscar — Since 1931
 
 A simple YouTube to MP3 streaming tool for family use.
-No storage required - streams MP3 directly to browser.
-Birthday gift for grandpa!
+Uses yt_dlp Python library with impersonate feature for better compatibility.
 """
 
-from flask import Flask, render_template, request, Response, jsonify
-import subprocess
-import re
-import json
 import os
 import sys
+import re
+import json
+import logging
+from flask import Flask, render_template, request, Response, jsonify
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+log = logging.getLogger('langsam')
 
 app = Flask(__name__)
 
 # --- Configuration ---
-YOUTUBE_PATTERNS = [
-    r'youtube\.com/watch',
-    r'youtu\.be/',
-    r'youtube\.com/shorts/',
-    r'youtube\.com/embed/',
-    r'youtube\.com/v/',
-    r'music\.youtube\.com',
-]
 MAX_DURATION = 7200  # 2 hours max
 AUDIO_QUALITY = '192'
+
+# yt-dlp options - following MeTube's approach
+YTDLP_BASE_OPTIONS = {
+    'quiet': True,
+    'no_color': True,
+    'no_warnings': True,
+    'extract_flat': False,
+    'noplaylist': True,
+    'ignore_no_formats_error': True,
+    'socket_timeout': 60,
+    'retries': 3,
+    'fragment_retries': 3,
+}
+
+# Try to enable impersonate feature if curl_cffi is available
+try:
+    import yt_dlp.networking.impersonate
+    IMPERSONATE_AVAILABLE = True
+    log.info("curl_cffi impersonate feature is available")
+except ImportError:
+    IMPERSONATE_AVAILABLE = False
+    log.warning("curl_cffi not available - impersonate feature disabled")
+
+
+def get_ytdlp_options(for_info=True):
+    """Get yt-dlp options with impersonate if available"""
+    opts = dict(YTDLP_BASE_OPTIONS)
+    
+    # Try impersonate feature (requires curl_cffi)
+    if IMPERSONATE_AVAILABLE:
+        try:
+            opts['impersonate'] = yt_dlp.networking.impersonate.ImpersonateTarget.from_str('chrome')
+            log.info("Using Chrome impersonation")
+        except Exception as e:
+            log.warning(f"Could not enable impersonate: {e}")
+    
+    if for_info:
+        opts['extract_flat'] = False
+    
+    return opts
 
 
 # --- Routes ---
@@ -40,19 +78,22 @@ def index():
 @app.route('/api/info')
 def get_info():
     """Fetch video metadata"""
-    url = request.args.get('url', '').strip()
+    import yt_dlp
     
-    print(f"[INFO] Received URL: {url}", file=sys.stderr)
+    url = request.args.get('url', '').strip()
+    log.info(f"Fetching info for: {url}")
     
     if not url:
         return jsonify({'error': 'No URL provided'}), 400
     
     if not validate_url(url):
-        print(f"[ERROR] URL validation failed for: {url}", file=sys.stderr)
         return jsonify({'error': 'Please enter a valid YouTube link'}), 400
     
     try:
-        info = get_video_info(url)
+        opts = get_ytdlp_options(for_info=True)
+        
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
         
         if not info:
             return jsonify({'error': 'Could not get video information'}), 400
@@ -70,15 +111,24 @@ def get_info():
             'duration': duration,
             'thumbnail': get_best_thumbnail(info),
         })
+        
+    except yt_dlp.utils.DownloadError as e:
+        error_msg = parse_ytdlp_error(str(e))
+        log.error(f"yt-dlp DownloadError: {e}")
+        return jsonify({'error': error_msg}), 400
     except Exception as e:
-        print(f"[ERROR] Exception in get_info: {str(e)}", file=sys.stderr)
-        return jsonify({'error': str(e)}), 400
+        log.error(f"Unexpected error in get_info: {e}")
+        return jsonify({'error': 'Unable to process this video'}), 400
 
 
 @app.route('/api/download')
 def download():
     """Stream MP3 download"""
+    import yt_dlp
+    import subprocess
+    
     url = request.args.get('url', '').strip()
+    log.info(f"Starting download for: {url}")
     
     if not url:
         return jsonify({'error': 'No URL provided'}), 400
@@ -88,7 +138,11 @@ def download():
     
     try:
         # Get title for filename
-        info = get_video_info(url)
+        opts = get_ytdlp_options(for_info=True)
+        
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        
         title = info.get('title', 'download') if info else 'download'
         filename = sanitize_filename(title) + '.mp3'
         
@@ -103,243 +157,118 @@ def download():
             'Expires': '0',
         }
         
+        def generate():
+            """Stream MP3 using subprocess for better memory efficiency"""
+            cmd = [
+                'yt-dlp',
+                '-f', 'bestaudio/best',
+                '-x',
+                '--audio-format', 'mp3',
+                '--audio-quality', AUDIO_QUALITY,
+                '-o', '-',
+                '--no-playlist',
+                '--quiet',
+                '--no-warnings',
+            ]
+            
+            # Add impersonate if available
+            if IMPERSONATE_AVAILABLE:
+                cmd.extend(['--impersonate', 'chrome'])
+            
+            cmd.append(url)
+            
+            log.info(f"Running command: {' '.join(cmd)}")
+            
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=8192
+            )
+            
+            try:
+                bytes_sent = 0
+                while True:
+                    chunk = process.stdout.read(8192)
+                    if not chunk:
+                        break
+                    bytes_sent += len(chunk)
+                    yield chunk
+                
+                log.info(f"Stream complete, sent {bytes_sent} bytes")
+                
+            except GeneratorExit:
+                log.info("Client disconnected")
+            finally:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+        
         return Response(
-            stream_mp3(url),
+            generate(),
             mimetype='audio/mpeg',
             headers=headers
         )
+        
     except Exception as e:
-        print(f"[ERROR] Exception in download: {str(e)}", file=sys.stderr)
+        log.error(f"Download error: {e}")
         return jsonify({'error': str(e)}), 500
 
 
 @app.route('/health')
 def health():
     """Health check endpoint"""
-    return jsonify({'status': 'ok'})
-
-
-@app.route('/api/update-ytdlp')
-def update_ytdlp():
-    """Update yt-dlp to latest version"""
-    try:
-        result = subprocess.run(
-            ['pip', 'install', '--upgrade', 'yt-dlp'],
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
-        return jsonify({
-            'status': 'ok',
-            'output': result.stdout,
-            'error': result.stderr
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    import yt_dlp
+    return jsonify({
+        'status': 'ok',
+        'yt_dlp_version': yt_dlp.version.__version__,
+        'impersonate_available': IMPERSONATE_AVAILABLE,
+    })
 
 
 # --- Helper Functions ---
 
 def validate_url(url):
-    """Validate YouTube URL format - very permissive"""
+    """Validate YouTube URL format - permissive"""
     if not url:
         return False
-    
     url_lower = url.lower()
-    
-    # Simple check - just needs to contain youtube or youtu.be
-    if 'youtube.com' in url_lower or 'youtu.be' in url_lower:
-        print(f"[INFO] URL validated: {url}", file=sys.stderr)
-        return True
-    
-    print(f"[WARN] URL did not match: {url}", file=sys.stderr)
-    return False
+    return 'youtube.com' in url_lower or 'youtu.be' in url_lower
 
 
-def get_video_info(url):
-    """Fetch video metadata using yt-dlp with multiple fallback approaches"""
-    
-    # Common options for all approaches
-    common_opts = [
-        '--dump-json',
-        '--no-playlist',
-        '--no-warnings',
-        '--remote-components', 'ejs:github',  # Enable JS challenge solver
-    ]
-    
-    # Try different approaches in order
-    approaches = [
-        # Approach 1: Web embedded client (often bypasses restrictions)
-        {
-            'name': 'web embedded',
-            'cmd': [
-                'yt-dlp',
-                *common_opts,
-                '--extractor-args', 'youtube:player_client=web_embedded',
-                url
-            ]
-        },
-        # Approach 2: Web client
-        {
-            'name': 'web client',
-            'cmd': [
-                'yt-dlp',
-                *common_opts,
-                '--extractor-args', 'youtube:player_client=web',
-                url
-            ]
-        },
-        # Approach 3: Android client (bypasses age restrictions)
-        {
-            'name': 'android client',
-            'cmd': [
-                'yt-dlp',
-                *common_opts,
-                '--extractor-args', 'youtube:player_client=android',
-                url
-            ]
-        },
-        # Approach 4: TV embedded client
-        {
-            'name': 'tv embedded',
-            'cmd': [
-                'yt-dlp',
-                *common_opts,
-                '--extractor-args', 'youtube:player_client=tv_embedded',
-                url
-            ]
-        },
-        # Approach 5: Minimal (let yt-dlp decide)
-        {
-            'name': 'minimal',
-            'cmd': [
-                'yt-dlp',
-                '--dump-json',
-                '--no-playlist',
-                '--remote-components', 'ejs:github',
-                url
-            ]
-        },
-    ]
-    
-    last_error = None
-    
-    for approach in approaches:
-        try:
-            print(f"[INFO] Trying {approach['name']}...", file=sys.stderr)
-            
-            result = subprocess.run(
-                approach['cmd'],
-                capture_output=True,
-                text=True,
-                timeout=120
-            )
-            
-            print(f"[DEBUG] Return code: {result.returncode}", file=sys.stderr)
-            
-            if result.returncode == 0 and result.stdout.strip():
-                print(f"[INFO] {approach['name']} succeeded!", file=sys.stderr)
-                try:
-                    return json.loads(result.stdout)
-                except json.JSONDecodeError:
-                    print(f"[WARN] JSON parse failed for {approach['name']}", file=sys.stderr)
-                    continue
-            else:
-                stderr_preview = result.stderr[:500] if result.stderr else 'No stderr'
-                print(f"[WARN] {approach['name']} failed: {stderr_preview}", file=sys.stderr)
-                last_error = result.stderr
-                
-        except subprocess.TimeoutExpired:
-            print(f"[WARN] {approach['name']} timed out", file=sys.stderr)
-            last_error = "Request timed out"
-        except Exception as e:
-            print(f"[WARN] {approach['name']} exception: {e}", file=sys.stderr)
-            last_error = str(e)
-    
-    # All approaches failed
-    error_msg = parse_ytdlp_error(last_error) if last_error else "Could not fetch video"
-    raise Exception(error_msg)
-
-
-def stream_mp3(url):
-    """Stream MP3 audio directly to response"""
-    cmd = [
-        'yt-dlp',
-        '-f', 'bestaudio/best',
-        '-x',
-        '--audio-format', 'mp3',
-        '--audio-quality', AUDIO_QUALITY,
-        '-o', '-',
-        '--no-playlist',
-        '--no-warnings',
-        '--remote-components', 'ejs:github',  # Enable JS challenge solver
-        '--extractor-args', 'youtube:player_client=web_embedded',
-        url
-    ]
-    
-    print(f"[INFO] Starting MP3 stream for: {url}", file=sys.stderr)
-    
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        bufsize=8192
-    )
-    
-    try:
-        bytes_sent = 0
-        while True:
-            chunk = process.stdout.read(8192)
-            if not chunk:
-                break
-            bytes_sent += len(chunk)
-            yield chunk
-        print(f"[INFO] Stream complete, sent {bytes_sent} bytes", file=sys.stderr)
-    except GeneratorExit:
-        print(f"[INFO] Client disconnected", file=sys.stderr)
-    except Exception as e:
-        print(f"[ERROR] Stream error: {e}", file=sys.stderr)
-    finally:
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-
-
-def parse_ytdlp_error(stderr):
+def parse_ytdlp_error(error_str):
     """Convert yt-dlp errors to user-friendly messages"""
-    if not stderr:
+    if not error_str:
         return 'Unable to process this video'
     
-    stderr_lower = stderr.lower()
+    error_lower = error_str.lower()
     
-    # Check for specific errors
-    if 'video unavailable' in stderr_lower:
+    if 'video unavailable' in error_lower:
         return 'Video not found or unavailable'
-    if 'private video' in stderr_lower:
+    if 'private video' in error_lower:
         return 'This video is private'
-    if 'copyright' in stderr_lower:
+    if 'sign in' in error_lower or 'login' in error_lower:
+        return 'This video requires sign-in. Try a different video.'
+    if 'age' in error_lower and 'restrict' in error_lower:
+        return 'Age-restricted video. Try a different video.'
+    if 'copyright' in error_lower:
         return 'Video unavailable due to copyright'
-    if 'removed' in stderr_lower or 'deleted' in stderr_lower:
+    if 'removed' in error_lower or 'deleted' in error_lower:
         return 'This video has been removed'
-    if 'premiere' in stderr_lower:
+    if 'premiere' in error_lower:
         return 'This video is not yet available'
-    if 'sign in' in stderr_lower:
-        return 'This video requires sign in'
-    if 'age' in stderr_lower:
-        return 'Age-restricted video - trying bypass...'
-    if 'http error 403' in stderr_lower:
+    if 'geo' in error_lower or 'region' in error_lower:
+        return 'Video not available in your region'
+    if '403' in error_lower:
         return 'Access denied by YouTube'
-    if 'http error 429' in stderr_lower:
-        return 'Too many requests - wait a moment'
-    if 'unable to extract' in stderr_lower:
-        return 'Could not extract video info'
-    if 'no video formats' in stderr_lower:
+    if '429' in error_lower:
+        return 'Too many requests - please wait a moment'
+    if 'no video formats' in error_lower:
         return 'No downloadable formats found'
     
-    # Return a generic but helpful message
-    return 'Unable to process this video. Please try another.'
+    return 'Unable to process this video. Try a different one.'
 
 
 def sanitize_filename(title):
@@ -349,15 +278,8 @@ def sanitize_filename(title):
     
     # Remove invalid characters for filenames
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', title)
-    
-    # Replace multiple spaces with single space
     cleaned = re.sub(r'\s+', ' ', cleaned)
-    
-    # Limit length (leaving room for .mp3 extension)
-    cleaned = cleaned[:96]
-    
-    # Remove leading/trailing spaces and dots
-    cleaned = cleaned.strip('. ')
+    cleaned = cleaned[:96].strip('. ')
     
     return cleaned or 'download'
 
@@ -367,36 +289,28 @@ def get_best_thumbnail(info):
     if not info:
         return ''
     
-    # Try to get a good quality thumbnail
     thumbnails = info.get('thumbnails', [])
-    
     if thumbnails:
-        # Sort by preference (higher resolution first)
         for thumb in reversed(thumbnails):
             url = thumb.get('url', '')
             if url and ('maxresdefault' in url or 'hqdefault' in url):
                 return url
-        # Fallback to last thumbnail
         return thumbnails[-1].get('url', '')
     
-    # Fallback to standard thumbnail field
     return info.get('thumbnail', '')
 
 
 # --- Main ---
 
 if __name__ == '__main__':
+    import yt_dlp
+    
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
     
-    print(f"[INFO] Starting Langsam Songs Downloader on port {port}", file=sys.stderr)
-    print(f"[INFO] Checking yt-dlp version...", file=sys.stderr)
-    
-    try:
-        result = subprocess.run(['yt-dlp', '--version'], capture_output=True, text=True)
-        print(f"[INFO] yt-dlp version: {result.stdout.strip()}", file=sys.stderr)
-    except:
-        print(f"[WARN] Could not get yt-dlp version", file=sys.stderr)
+    log.info(f"Starting Langsam Songs Downloader on port {port}")
+    log.info(f"yt-dlp version: {yt_dlp.version.__version__}")
+    log.info(f"Impersonate available: {IMPERSONATE_AVAILABLE}")
     
     app.run(
         host='0.0.0.0',
